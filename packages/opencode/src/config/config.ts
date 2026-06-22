@@ -249,18 +249,26 @@ export const layer = Layer.effect(
       // The gateway (api.awacxo.com) is OpenAI-compatible; the API key is supplied
       // after sign-in. Models are defined here so they list before the backend is live.
       let result: Info = {
-        model: "awacxocode/deepseek-v4",
+        model: "awacxocode/deepseek-v4-flash",
         enabled_providers: ["awacxocode"],
         provider: {
           awacxocode: {
             name: "awacxocode",
             npm: "@ai-sdk/openai-compatible",
-            options: { baseURL: "https://api.awacxo.com/v1" },
+            options: { baseURL: "https://api.code.awacxo.com/v1" },
+            // Keep these slugs in sync with gateway/src/models.ts (MODEL_LIST)
+            // and web/lib/site.ts (models). The gateway maps each slug to a real
+            // OpenRouter model id.
             models: {
-              "deepseek-v4": { name: "DeepSeek V4" },
+              "claude-opus-4.8": { name: "Claude Opus 4.8" },
+              "claude-sonnet-4.6": { name: "Claude Sonnet 4.6" },
+              "gpt-5.5": { name: "GPT-5.5" },
+              "gemini-3.5-flash": { name: "Gemini 3.5 Flash" },
+              "grok-build": { name: "Grok Build" },
+              "deepseek-v4-flash": { name: "DeepSeek V4 Flash" },
               "glm-5.2": { name: "GLM 5.2" },
-              "kimi-2.6": { name: "Kimi 2.6" },
-              "gpt": { name: "GPT" },
+              "kimi-k2.7-code": { name: "Kimi K2.7 Code" },
+              "minimax-m3": { name: "MiniMax M3" },
             },
           },
         },
