@@ -39,7 +39,7 @@ const openBrowser = (url: string) =>
             : ["xdg-open", url]
       Process.spawn(cmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
     } catch {
-      /* ignore — the URL was printed for manual open */
+      /* ignore - the URL was printed for manual open */
     }
   })
 
@@ -56,7 +56,7 @@ async function pollForKey(deviceCode: string, interval: number, expiresIn: numbe
     })
     const data = (await res.json().catch(() => ({}))) as { status?: string; api_key?: string }
     if (data.status === "approved" && data.api_key) return data.api_key
-    if (data.status === "expired") throw new Error("the request expired — run `awacxocode login` again")
+    if (data.status === "expired") throw new Error("the request expired - run `awacxocode login` again")
     if (data.status === "denied") throw new Error("the request was denied")
     // pending / not_found(race) → keep polling
   }
@@ -66,7 +66,7 @@ async function pollForKey(deviceCode: string, interval: number, expiresIn: numbe
 export const LoginCommand = effectCmd({
   command: "login",
   describe: "sign in to awacxocode",
-  // No project instance needed — this only touches global credentials.
+  // No project instance needed - this only touches global credentials.
   instance: false,
   handler: Effect.fn("Cli.login")(function* (_args) {
     const authSvc = yield* Auth.Service
