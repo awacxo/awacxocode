@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 
-import { $ } from "bun"
 import fs from "fs/promises"
 import os from "os"
 import path from "path"
@@ -45,15 +44,17 @@ async function generate() {
       if (await Bun.file(target).exists()) throw new Error(`Database migration already exists: ${name}`)
       await Bun.write(
         target,
-        renderMigration(name, await Bun.file(path.join(incremental, name, "migration.sql")).text()),
+        await formatTypescript(
+          renderMigration(name, await Bun.file(path.join(incremental, name, "migration.sql")).text()),
+        ),
       )
-      await fs.copyFile(path.join(incremental, name, "snapshot.json"), snapshot)
+      await Bun.write(snapshot, await formatJson(await Bun.file(path.join(incremental, name, "snapshot.json")).text()))
     }
 
     await fs.mkdir(full)
     await drizzle(temporary, full, "schema")
-    await Bun.write(schema, renderSchema(await generatedSql(full)))
-    await Bun.write(registry, renderRegistry(await typescriptMigrations()))
+    await Bun.write(schema, await formatTypescript(renderSchema(await generatedSql(full))))
+    await Bun.write(registry, await formatTypescript(renderRegistry(await typescriptMigrations())))
   } finally {
     await fs.rm(temporary, { recursive: true, force: true })
   }
@@ -76,12 +77,12 @@ async function check() {
 
     await fs.mkdir(full)
     await drizzle(temporary, full, "schema")
-    if ((await Bun.file(schema).text()) !== renderSchema(await generatedSql(full))) {
+    if ((await Bun.file(schema).text()) !== (await formatTypescript(renderSchema(await generatedSql(full))))) {
       throw new Error("Current database schema is stale. Run `bun script/migration.ts` from packages/core.")
     }
 
     const migrations = await typescriptMigrations()
-    if ((await Bun.file(registry).text()) !== renderRegistry(migrations)) {
+    if ((await Bun.file(registry).text()) !== (await formatTypescript(renderRegistry(migrations)))) {
       throw new Error("Database migration registry is stale. Run `bun script/migration.ts` from packages/core.")
     }
   } finally {
@@ -98,9 +99,14 @@ async function drizzle(temporary: string, output: string, name?: string) {
 export default { ...config, out: ${JSON.stringify(output)} }
 `,
   )
-  await $`bun drizzle-kit generate --config ${config} ${name ? ["--name", name] : []}`.cwd(
-    path.join(root, "packages/core"),
-  )
+  const child = Bun.spawn(["bun", "drizzle-kit", "generate", "--config", config, ...(name ? ["--name", name] : [])], {
+    cwd: path.join(root, "packages/core"),
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  })
+  const exit = await child.exited
+  if (exit !== 0) throw new Error(`Drizzle generation failed with exit code ${exit}.`)
 }
 
 async function generatedMigrations(directory: string) {
@@ -124,30 +130,34 @@ async function typescriptMigrations() {
 
 function renderMigration(name: string, sql: string) {
   return `import { Effect } from "effect"
-import type { DatabaseMigration } from "../migration"
+import type { DatabaseMigration } from "../migration.js"
 
-export default {
+const migration: DatabaseMigration.Migration = {
   id: ${JSON.stringify(name)},
   up(tx) {
     return Effect.gen(function* () {
 ${renderStatements(sql)}
     })
   },
-} satisfies DatabaseMigration.Migration
+}
+
+export default migration
 `
 }
 
 function renderSchema(sql: string) {
   return `import { Effect } from "effect"
-import type { DatabaseMigration } from "./migration"
+import type { DatabaseMigration } from "./migration.js"
 
-export default {
+const schema: Omit<DatabaseMigration.Migration, "id"> = {
   up(tx) {
     return Effect.gen(function* () {
 ${renderStatements(sql)}
     })
   },
-} satisfies Omit<DatabaseMigration.Migration, "id">
+}
+
+export default schema
 `
 }
 
@@ -170,13 +180,37 @@ function escapeTemplate(line: string) {
   return line.replaceAll("\\", "\\\\").replaceAll("`", "\\`").replaceAll("${", "\\${")
 }
 
-function renderRegistry(names: string[]) {
-  return `import type { DatabaseMigration } from "./migration"
+async function formatTypescript(input: string) {
+  const prettier = await import("prettier")
+  const typescript = await import("prettier/plugins/typescript")
+  const estree = await import("prettier/plugins/estree")
+  return prettier.format(input, {
+    parser: "typescript",
+    plugins: [typescript.default, estree.default],
+    semi: false,
+    printWidth: 120,
+  })
+}
 
-export const migrations = (
-  await Promise.all([
-${names.map((name) => `    import("./migration/${name}"),`).join("\n")}
-  ])
-).map((module) => module.default) satisfies DatabaseMigration.Migration[]
+// Drizzle emits every array multi-line; format the snapshot so regeneration
+// diffs stay minimal against the prettier-styled checked-in copy.
+async function formatJson(input: string) {
+  const prettier = await import("prettier")
+  const babel = await import("prettier/plugins/babel")
+  const estree = await import("prettier/plugins/estree")
+  return prettier.format(input, {
+    parser: "json",
+    plugins: [babel.default, estree.default],
+    printWidth: 120,
+  })
+}
+
+function renderRegistry(names: string[]) {
+  return `import type { DatabaseMigration } from "./migration.js"
+${names.map((name, index) => `import m${index.toString().padStart(2, "0")} from "./migration/${name}.js"`).join("\n")}
+
+export const migrations = [
+${names.map((_, index) => `  m${index.toString().padStart(2, "0")},`).join("\n")}
+] satisfies DatabaseMigration.Migration[]
 `
 }

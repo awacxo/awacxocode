@@ -1,68 +1,79 @@
 # Releasing awacxocode
 
-The CLI ships as platform binaries on **GitHub Releases**. The install script
-(`code.awacxo.com/install` → `cli/install`) downloads them from `releases/latest`.
-That's the whole MVP — npm/Homebrew/AUR are optional and covered at the bottom.
+awacxocode is upstream [opencode](https://github.com/anomalyco/opencode) plus a small, scripted
+set of changes in `fork/`. Releases ship as platform binaries on GitHub Releases
+(`awacxo/awacxocode`); the install script (`code.awacxo.com/install` → `install`) downloads them
+from `releases/latest`.
 
-## One-time setup
+## What lives in `fork/`
 
-1. **Create a GitHub repo** for the CLI (e.g. `yourname/awacxocode`) and push `cli/` to it.
-2. **Point the install script at it.** In `install`, set:
+| Path              | What it is                                                                 |
+| ----------------- | -------------------------------------------------------------------------- |
+| `fork/VERSION`    | Our product version (e.g. `2.0.0`). This is what users see and what tags use. |
+| `fork/UPSTREAM`   | The opencode tag we are built on (e.g. `v2.1.3`).                           |
+| `fork/overlay/`   | Whole files copied over upstream (our own modules, README, LICENSE, install). |
+| `fork/patches.ts` | The only in-place edits to upstream files, each with an id and one anchor.  |
+| `fork/upgrade.sh` | Builds a fresh tree: upstream tag + overlay + patches.                      |
+| `fork/release.sh` | Builds all targets from that tree and uploads a GitHub release.             |
+
+## Versioning
+
+- `fork/VERSION` is independent of opencode's version. Bump it for every release (patch for
+  fixes, minor for an upstream bump or new features, major for breaking changes).
+- `fork/UPSTREAM` only changes when you upgrade opencode (below).
+- Builds always use `OPENCODE_VERSION=$(cat fork/VERSION)` and `OPENCODE_CHANNEL=awacxocode`.
+  The explicit version stops the build from guessing one from npm; the channel gives us a
+  background-service port distinct from a real opencode install.
+- Tags are `v<VERSION>`. `release.sh` refuses to run if that release (draft or not) exists.
+
+## Cut a release
+
+Requires bun >= 1.4.4, `gh` (authenticated, push access to `awacxo/awacxocode`), `tar`, `zip`.
+
+**Gateway first.** v2 CLIs get their provider, model list and login command from
+`https://api.code.awacxo.com/.well-known/opencode`. Deploy the gateway (`gateway/`) and check that
+URL returns JSON *before* publishing a v2 release, or `awacxocode login` fails. The model list
+now lives only in `gateway/src/models.ts`; changing it needs a gateway deploy, not a CLI release.
+For staging, `AWACXOCODE_GATEWAY=<origin>` points the CLI at another gateway.
+
+1. In an upgrade checkout (see below), bump `fork/VERSION` and commit.
+2. Push the branch so the tag can point at this exact commit.
+3. Build and upload a draft:
    ```bash
-   GITHUB_REPO="${GITHUB_REPO:-yourname/awacxocode}"
+   ./fork/release.sh
    ```
-3. **Serve the install script** at `https://code.awacxo.com/install` (a redirect/proxy to the
-   raw `install` file, or copy it into the website's `public/`).
+   This builds all 12 targets, packs them into `fork-dist/awacxocode-<target>.(tar.gz|zip)` with
+   the binary at the archive root, checks there are exactly 12, runs the host binary's
+   `--version`, and creates a **draft** release `v<VERSION>` with the archives attached.
+4. Review the draft, then publish it:
+   ```bash
+   gh release edit v<VERSION> --repo awacxo/awacxocode --draft=false --latest
+   ```
+   (Or pass `--publish` to `release.sh` to do steps 3 and 4 in one go.)
+5. Verify: `curl -fsSL https://code.awacxo.com/install | bash && awacxocode --version`.
+   Existing users get it via `awacxocode upgrade`.
 
-No secrets are needed for GitHub Releases — the workflow uses the built-in `GITHUB_TOKEN`.
+Asset names must stay exactly as the install script expects: `awacxocode-<target>.tar.gz` for
+linux and `awacxocode-<target>.zip` for darwin/windows, with targets `linux-{x64,x64-baseline,
+arm64,x64-musl,x64-baseline-musl,arm64-musl}`, `darwin-{arm64,x64,x64-baseline}`,
+`windows-{x64,x64-baseline,arm64}`.
 
-## Cut a release (CI — recommended)
-
-1. Go to the repo's **Actions → release → Run workflow**.
-2. Enter a version, e.g. `1.0.0`.
-
-The workflow (`.github/workflows/release.yml`) builds every platform (Bun cross-compiles
-linux/macOS/windows × x64/arm64 from one Linux runner), uploads the archives, and marks the
-release `latest`. After it finishes:
-
-```bash
-curl -fsSL https://code.awacxo.com/install | bash
-```
-
-## Cut a release (local alternative)
-
-Requires `bun`, `gh` (authenticated), and push access to the repo.
+## Upgrade upstream opencode
 
 ```bash
-cd cli
-bun install
-REPO=yourname/awacxocode VERSION=1.0.0
-gh release create "v$VERSION" --repo "$REPO" --title "v$VERSION" --notes "awacxocode v$VERSION" --draft
-
-cd packages/opencode
-OPENCODE_VERSION=$VERSION OPENCODE_RELEASE=1 GH_REPO=$REPO GH_TOKEN=$(gh auth token) \
-  bun run build --skip-embed-web-ui
-
-gh release edit "v$VERSION" --repo "$REPO" --draft=false --latest
+./fork/upgrade.sh <tag>        # e.g. ./fork/upgrade.sh v2.2.0
 ```
 
-## How versioning works
+This creates a git worktree on branch `upgrade/<tag>`, puts upstream `<tag>` in it, copies
+`fork/overlay/` over it, applies `fork/patches.ts`, then installs, typechecks, builds and smoke
+tests. On success, make sure `fork/UPSTREAM` reads `<tag>`, bump `fork/VERSION`, commit, and
+release from that worktree.
 
-`OPENCODE_VERSION` is read verbatim — always pass it. (Without it, the build tries to fetch the
-last `opencode-ai` version from npm to auto-bump, which is wrong for this fork.)
-`OPENCODE_RELEASE=1` is what triggers the archive + upload step in `build.ts`.
+**If a patch fails**, the error names the patch id (e.g. `defaults-load`) and the file. Upstream
+moved or rewrote that code: open the file in the worktree, find the new equivalent spot, update
+that patch's `find` (and `replace` if needed) in `fork/patches.ts`, and re-run `upgrade.sh`.
+Keep each patch to one small, exact anchor; anything larger belongs in `fork/overlay/` as a whole
+file.
 
-## Notes
-
-- `--skip-embed-web-ui` keeps the binary lean (TUI only). Drop it to bundle the optional
-  browser web UI (slower build, builds `packages/app`).
-- The other workflows under `.github/workflows/` are opencode's and are guarded with
-  `if: github.repository == 'anomalyco/opencode'`, so they stay inert on your fork. You can
-  delete them to declutter.
-
-## Optional: npm distribution (later)
-
-`packages/opencode/script/publish.ts` publishes the CLI to npm as `awacxocode-ai` plus one
-package per platform (it appends `-ai` to the package name and wires a `postinstall.mjs`).
-It also pushes Docker/AUR/Homebrew — all hardcoded to opencode's repos; strip those before
-using it. Skip npm entirely until the `curl | bash` flow is live.
+If typecheck or the smoke test fails, the usual cause is an overlay file that depends on an
+upstream API that changed — fix the overlay file and re-run.

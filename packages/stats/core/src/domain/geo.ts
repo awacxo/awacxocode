@@ -7,13 +7,16 @@ import { RETIRED_STAT_MODELS, RETIRED_STAT_PROVIDERS } from "./model-normalizati
 import {
   chunks,
   collapseRows,
+  DATA_SITE_TIERS,
   inserted,
+  omitUniqueUsers,
   rankRowsWithMarketShare,
   statPeriodKey,
   statRowScope,
   synthesizeAllTierRows,
   toStatBaseRow,
   UPSERT_CHUNK_SIZE,
+  withUniqueUsersFallback,
   type StatBaseAggregate,
 } from "./stat"
 
@@ -52,7 +55,11 @@ export declare namespace GeoStatRepo {
       readonly model?: string
     }) => Effect.Effect<GeoStatRow[], DatabaseError>
     readonly upsert: (rows: GeoStatRow[]) => Effect.Effect<void, DatabaseError>
-    readonly deleteRetiredDimensions: (rows: GeoStatRow[]) => Effect.Effect<void, DatabaseError>
+    readonly deleteRetiredDimensions: (
+      rows: GeoStatRow[],
+      hiddenModels: readonly string[],
+    ) => Effect.Effect<void, DatabaseError>
+    readonly deleteUnknownDimensions: (rows: GeoStatRow[]) => Effect.Effect<void, DatabaseError>
   }
 }
 
@@ -91,7 +98,7 @@ export class GeoStatRepo extends Context.Service<GeoStatRepo, GeoStatRepo.Servic
                   eq(geoStat.grain, "day"),
                   eq(geoStat.client, "all"),
                   eq(geoStat.source, "all"),
-                  inArray(geoStat.tier, ["Go", "go"]),
+                  inArray(geoStat.tier, DATA_SITE_TIERS),
                   scope,
                 ),
               )
@@ -136,49 +143,56 @@ export class GeoStatRepo extends Context.Service<GeoStatRepo, GeoStatRepo.Servic
           chunks(rows, UPSERT_CHUNK_SIZE),
           (chunk) =>
             Effect.tryPromise({
-              try: () =>
-                db
-                  .insert(geoStat)
-                  .values(chunk)
-                  .onDuplicateKeyUpdate({
-                    set: {
-                      continent: inserted("continent"),
-                      sessions: inserted("sessions"),
-                      requests: inserted("requests"),
-                      input_tokens: inserted("input_tokens"),
-                      output_tokens: inserted("output_tokens"),
-                      reasoning_tokens: inserted("reasoning_tokens"),
-                      cache_read_tokens: inserted("cache_read_tokens"),
-                      total_tokens: inserted("total_tokens"),
-                      input_cost_microcents: inserted("input_cost_microcents"),
-                      output_cost_microcents: inserted("output_cost_microcents"),
-                      total_cost_microcents: inserted("total_cost_microcents"),
-                      avg_duration_ms: inserted("avg_duration_ms"),
-                      p50_duration_ms: inserted("p50_duration_ms"),
-                      p95_duration_ms: inserted("p95_duration_ms"),
-                      avg_ttfb_ms: inserted("avg_ttfb_ms"),
-                      p50_ttfb_ms: inserted("p50_ttfb_ms"),
-                      p95_ttfb_ms: inserted("p95_ttfb_ms"),
-                      avg_output_tps: inserted("avg_output_tps"),
-                      success_count: inserted("success_count"),
-                      error_count: inserted("error_count"),
-                      sample_count: inserted("sample_count"),
-                      market_share_tokens: inserted("market_share_tokens"),
-                      market_share_requests: inserted("market_share_requests"),
-                      market_share_sessions: inserted("market_share_sessions"),
-                      rank_by_tokens: inserted("rank_by_tokens"),
-                      rank_by_requests: inserted("rank_by_requests"),
-                      rank_by_sessions: inserted("rank_by_sessions"),
-                      rank_by_cost: inserted("rank_by_cost"),
-                    },
-                  }),
+              try: () => withUniqueUsersFallback((includeUniqueUsers) => upsertGeoChunk(chunk, includeUniqueUsers)),
               catch: (cause) => DatabaseError.make({ cause }),
             }),
           { discard: true },
         )
       })
 
-      const deleteRetiredDimensions = Effect.fn("GeoStatRepo.deleteRetiredDimensions")(function* (rows: GeoStatRow[]) {
+      function upsertGeoChunk(chunk: GeoStatRow[], includeUniqueUsers: boolean) {
+        return db
+          .insert(geoStat)
+          .values(includeUniqueUsers ? chunk : omitUniqueUsers(chunk))
+          .onDuplicateKeyUpdate({
+            set: {
+              continent: inserted("continent"),
+              sessions: inserted("sessions"),
+              requests: inserted("requests"),
+              ...(includeUniqueUsers ? { unique_users: inserted("unique_users") } : {}),
+              input_tokens: inserted("input_tokens"),
+              output_tokens: inserted("output_tokens"),
+              reasoning_tokens: inserted("reasoning_tokens"),
+              cache_read_tokens: inserted("cache_read_tokens"),
+              total_tokens: inserted("total_tokens"),
+              input_cost_microcents: inserted("input_cost_microcents"),
+              output_cost_microcents: inserted("output_cost_microcents"),
+              total_cost_microcents: inserted("total_cost_microcents"),
+              avg_duration_ms: inserted("avg_duration_ms"),
+              p50_duration_ms: inserted("p50_duration_ms"),
+              p95_duration_ms: inserted("p95_duration_ms"),
+              avg_ttfb_ms: inserted("avg_ttfb_ms"),
+              p50_ttfb_ms: inserted("p50_ttfb_ms"),
+              p95_ttfb_ms: inserted("p95_ttfb_ms"),
+              avg_output_tps: inserted("avg_output_tps"),
+              success_count: inserted("success_count"),
+              error_count: inserted("error_count"),
+              sample_count: inserted("sample_count"),
+              market_share_tokens: inserted("market_share_tokens"),
+              market_share_requests: inserted("market_share_requests"),
+              market_share_sessions: inserted("market_share_sessions"),
+              rank_by_tokens: inserted("rank_by_tokens"),
+              rank_by_requests: inserted("rank_by_requests"),
+              rank_by_sessions: inserted("rank_by_sessions"),
+              rank_by_cost: inserted("rank_by_cost"),
+            },
+          })
+      }
+
+      const deleteRetiredDimensions = Effect.fn("GeoStatRepo.deleteRetiredDimensions")(function* (
+        rows: GeoStatRow[],
+        hiddenModels: readonly string[],
+      ) {
         const scope = statRowScope(rows)
         if (!scope) return
 
@@ -193,14 +207,64 @@ export class GeoStatRepo extends Context.Service<GeoStatRepo, GeoStatRepo.Servic
                   inArray(geoStat.dataset, scope.datasets),
                   inArray(geoStat.client, scope.clients),
                   inArray(geoStat.source, scope.sources),
-                  or(inArray(geoStat.provider, RETIRED_STAT_PROVIDERS), inArray(geoStat.model, RETIRED_STAT_MODELS)),
+                  or(
+                    inArray(geoStat.provider, RETIRED_STAT_PROVIDERS),
+                    inArray(geoStat.model, [...RETIRED_STAT_MODELS, ...hiddenModels]),
+                    and(eq(geoStat.provider, "unknown"), eq(geoStat.model, "hy4-preview")),
+                  ),
                 ),
               ),
           catch: (cause) => DatabaseError.make({ cause }),
         })
       })
 
-      return GeoStatRepo.of({ listDaily, listByPeriod, upsert, deleteRetiredDimensions })
+      const deleteUnknownDimensions = Effect.fn("GeoStatRepo.deleteUnknownDimensions")(function* (rows: GeoStatRow[]) {
+        const scope = statRowScope(rows)
+        if (!scope) return
+        const replacements = new Set(rows.map((row) => [statPeriodKey(row), row.model, row.country].join("\u0000")))
+        const stale = yield* Effect.tryPromise({
+          try: () =>
+            db
+              .select({
+                id: geoStat.id,
+                grain: geoStat.grain,
+                period_key: geoStat.period_key,
+                dataset: geoStat.dataset,
+                tier: geoStat.tier,
+                client: geoStat.client,
+                source: geoStat.source,
+                model: geoStat.model,
+                country: geoStat.country,
+              })
+              .from(geoStat)
+              .where(
+                and(
+                  eq(geoStat.provider, "unknown"),
+                  inArray(geoStat.grain, scope.grains),
+                  inArray(geoStat.period_key, scope.periodKeys),
+                  inArray(geoStat.dataset, scope.datasets),
+                  inArray(geoStat.client, scope.clients),
+                  inArray(geoStat.source, scope.sources),
+                  inArray(geoStat.model, [...new Set(rows.map((row) => row.model ?? "all"))]),
+                ),
+              ),
+          catch: (cause) => DatabaseError.make({ cause }),
+        })
+        const ids = stale
+          .filter((row) => replacements.has([statPeriodKey(row), row.model, row.country].join("\u0000")))
+          .map((row) => row.id)
+        yield* Effect.forEach(
+          chunks(ids, UPSERT_CHUNK_SIZE),
+          (chunk) =>
+            Effect.tryPromise({
+              try: () => db.delete(geoStat).where(and(eq(geoStat.provider, "unknown"), inArray(geoStat.id, chunk))),
+              catch: (cause) => DatabaseError.make({ cause }),
+            }),
+          { discard: true },
+        )
+      })
+
+      return GeoStatRepo.of({ listDaily, listByPeriod, upsert, deleteRetiredDimensions, deleteUnknownDimensions })
     }),
   )
 }

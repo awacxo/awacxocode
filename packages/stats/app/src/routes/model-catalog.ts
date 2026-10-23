@@ -1,7 +1,9 @@
+import { STEALTH_MODELS, statModel } from "@opencode/stats-core/domain/model-normalization"
 import { query } from "@solidjs/router"
 
-export const modelCatalogSourceUrl = "https://models.dev/models.json"
-export const modelCatalogPricingUrl = "https://models.dev/api.json"
+export const modelCatalogSourceUrl = "https://models.opencode.ai/catalog.json"
+export const modelCatalogPricingUrl = "https://models.opencode.ai/api.json"
+export const modelCatalogLabSourceUrl = "https://models.opencode.ai/labs"
 
 export type ModelCatalogCost = {
   input: number
@@ -15,6 +17,7 @@ export type ModelCatalogEntry = {
   lab: string
   slug: string
   name: string
+  description?: string
   family?: string
   knowledge?: string
   releaseDate?: string
@@ -22,14 +25,16 @@ export type ModelCatalogEntry = {
   limit?: { context?: number; output?: number }
   modalities: { input: string[]; output: string[] }
   openWeights: boolean
-  reasoning: boolean
-  toolCall: boolean
+  reasoning?: boolean
+  toolCall?: boolean
   attachment: boolean
   temperature: boolean
   cost?: ModelCatalogCost
   weights: { label: string; url: string }[]
   benchmarks: ModelCatalogBenchmark[]
 }
+
+export type ModelCatalogSpecs = Pick<ModelCatalogEntry, "knowledge" | "releaseDate" | "limit" | "modalities">
 
 export type ModelCatalogBenchmark = {
   name: string
@@ -45,30 +50,63 @@ export type ModelCatalogBenchmark = {
 export type ModelCatalogLab = {
   id: string
   name: string
+  description?: string
   models: ModelCatalogEntry[]
 }
 
 export type ModelCatalog = {
   models: ModelCatalogEntry[]
+  aliases?: ModelCatalogEntry[]
   labs: ModelCatalogLab[]
+  // Stealth models stay out of the lab catalog, but their OpenCode listings publish limits and modalities.
+  stealthSpecs: Record<string, ModelCatalogSpecs>
+}
+
+const catalogTtlMs = 5 * 60 * 1000
+let cachedCatalog: { expiresAt: number; value: Promise<ModelCatalog> } | undefined
+
+// The catalog is about 11 MB of JSON to fetch and parse and rarely changes, so share it across requests.
+export function loadModelCatalog() {
+  const now = Date.now()
+  if (cachedCatalog && cachedCatalog.expiresAt > now) return cachedCatalog.value
+  const value = fetchModelCatalog()
+  const entry = { expiresAt: now + catalogTtlMs, value }
+  cachedCatalog = entry
+  // An empty catalog means a source failed, so retry on the next request instead of serving it for the TTL.
+  const evict = () => {
+    if (cachedCatalog === entry) cachedCatalog = undefined
+  }
+  value.then((catalog) => {
+    if (catalog.models.length === 0) evict()
+  }, evict)
+  return value
+}
+
+async function fetchModelCatalog() {
+  const [models, pricing, labs] = await Promise.all([
+    fetchCatalogPayload(modelCatalogSourceUrl),
+    fetchCatalogPayload(modelCatalogPricingUrl),
+    fetchLabCatalogPayload(modelCatalogLabSourceUrl),
+  ])
+  return buildModelCatalog(models, pricing, labs)
 }
 
 export const getModelCatalog = query(async () => {
   "use server"
-  const [models, pricing] = await Promise.all([
-    fetchCatalogPayload(modelCatalogSourceUrl),
-    fetchCatalogPayload(modelCatalogPricingUrl),
-  ])
-  return buildModelCatalog(models, pricing)
+  return loadModelCatalog()
 }, "getModelCatalog")
 
 export function findModelCatalogEntry(catalog: ModelCatalog, model: string, lab?: string) {
-  const normalizedId = lab ? `${catalogLabSlug(lab)}/${catalogSlug(model)}` : model.trim().toLowerCase()
-  const leaf = catalogSlug(model)
+  const canonicalModel = statModel(model, undefined)
+  const normalizedId = lab
+    ? `${catalogLabSlug(lab)}/${catalogSlug(canonicalModel)}`
+    : canonicalModel.trim().toLowerCase()
+  const leaf = catalogSlug(canonicalModel)
   return (
     catalog.models.find((entry) => entry.id.toLowerCase() === normalizedId) ??
     catalog.models.find((entry) => (lab ? entry.lab === catalogLabSlug(lab) : true) && entry.slug === leaf) ??
-    catalog.models.find((entry) => entry.slug === leaf)
+    catalog.models.find((entry) => entry.slug === leaf) ??
+    catalog.aliases?.find((entry) => (lab ? entry.lab === catalogLabSlug(lab) : true) && entry.slug === leaf)
   )
 }
 
@@ -77,21 +115,56 @@ export function findModelCatalogLab(catalog: ModelCatalog, lab: string) {
   return catalog.labs.find((entry) => entry.id === id)
 }
 
+export function catalogModelPath(entry: Pick<ModelCatalogEntry, "lab" | "slug">) {
+  return `/data/${entry.lab}/${entry.slug}`
+}
+
+export function catalogLabPath(lab: string) {
+  return `/data/${catalogLabSlug(lab)}`
+}
+
+export function canonicalModelEntry(catalog: ModelCatalog, model: string, lab: string) {
+  const entry = findModelCatalogEntry(catalog, model, lab)
+  // A catalog path is only canonical if it resolves back to the same entry, which rules out redirect loops.
+  if (!entry || findModelCatalogEntry(catalog, entry.slug, entry.lab)?.id !== entry.id) return undefined
+  return entry
+}
+
+export function modelPagePath(catalog: ModelCatalog, lab: string, model: string) {
+  const entry = canonicalModelEntry(catalog, model, lab)
+  if (entry) return catalogModelPath(entry)
+  return `/data/${catalogSlug(lab)}/${catalogSlug(model)}`
+}
+
 export function formatCatalogLabName(lab: string) {
   const known: Record<string, string> = {
+    ai21: "AI21",
+    aisingapore: "AI Singapore",
     alibaba: "Alibaba",
     anthropic: "Anthropic",
+    "arcee-ai": "Arcee AI",
+    "bytedance-seed": "ByteDance Seed",
     cohere: "Cohere",
+    deepreinforce: "DeepReinforce",
     deepseek: "DeepSeek",
     google: "Google",
+    ibm: "IBM",
+    inclusionai: "inclusionAI",
     meta: "Meta",
     minimax: "MiniMax",
     mistral: "Mistral",
     moonshotai: "Moonshot",
+    "nex-agi": "Nex AGI",
+    nvidia: "NVIDIA",
     openai: "OpenAI",
+    openbmb: "OpenBMB",
     perplexity: "Perplexity",
+    quiverai: "QuiverAI",
+    sdaia: "SDAIA",
     stepfun: "StepFun",
+    "swiss-ai": "Swiss AI",
     tencent: "Tencent",
+    thinkingmachines: "Thinking Machines",
     xai: "xAI",
     xiaomi: "Xiaomi",
     zai: "Z.ai",
@@ -100,6 +173,17 @@ export function formatCatalogLabName(lab: string) {
     zhipuai: "Zhipu",
   }
   return known[catalogSlug(lab)] ?? lab.replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+export function isProviderlessLab(lab: string | undefined) {
+  return !lab || catalogSlug(lab) === "unknown"
+}
+
+export function isKnownCatalogLab(lab: string | undefined, catalogLabs: readonly string[]) {
+  if (!lab || isProviderlessLab(lab)) return false
+  const id = catalogLabSlug(lab)
+  const key = catalogSlug(formatCatalogLabName(lab))
+  return catalogLabs.some((candidate) => candidate === id || catalogSlug(formatCatalogLabName(candidate)) === key)
 }
 
 export function catalogSlug(value: string) {
@@ -111,32 +195,80 @@ export function catalogSlug(value: string) {
     .replace(/-{2,}/g, "-")
 }
 
-function buildModelCatalog(payload: unknown, pricingPayload?: unknown): ModelCatalog {
+export function buildModelCatalog(payload: unknown, pricingPayload?: unknown, labPayload?: unknown): ModelCatalog {
   const costs = readCatalogCosts(pricingPayload)
-  const models = (Array.isArray(payload) ? payload : isRecord(payload) ? Object.values(payload) : [])
+  const labDescriptions = readCatalogLabDescriptions(payload, pricingPayload, labPayload)
+  const models = readCatalogModels(payload)
     .flatMap(readModelCatalogEntry)
     .map((model) => ({
       ...model,
       cost:
         costs.get(catalogIdKey(model.id)) ??
         costs.get(`${model.lab}/${model.slug}`) ??
+        costs.get(`opencode-go/${model.slug}`) ??
         costs.get(model.slug) ??
         model.cost,
     }))
     .toSorted((a, b) => a.lab.localeCompare(b.lab) || displayDateTime(b.releaseDate) - displayDateTime(a.releaseDate))
   return {
     models,
+    // Contributor is a serving tier of these Muse models, with its own pricing.
+    // Keep aliases out of the model population used to normalize benchmark scores.
+    aliases: ["meta/muse-spark-1.2", "meta/muse-spark-1.3"].flatMap((id) => {
+      const model = models.find((entry) => entry.id === id)
+      if (!model) return []
+      const alias = `${id}-contributor`
+      return [
+        {
+          ...model,
+          id: alias,
+          slug: `${model.slug}-contributor`,
+          name: `${model.name} Contributor`,
+          cost:
+            costs.get(catalogIdKey(alias)) ??
+            costs.get(`${model.lab}/${model.slug}-contributor`) ??
+            costs.get(`${model.slug}-contributor`),
+        },
+      ]
+    }),
     labs: Object.values(
       models.reduce<Record<string, ModelCatalogLab>>((result, model) => {
         result[model.lab] = {
           id: model.lab,
           name: formatCatalogLabName(model.lab),
+          description: result[model.lab]?.description ?? labDescriptions.get(model.lab),
           models: [...(result[model.lab]?.models ?? []), model],
         }
         return result
       }, {}),
     ).toSorted((a, b) => a.name.localeCompare(b.name)),
+    stealthSpecs: readStealthModelSpecs(pricingPayload),
   }
+}
+
+function readStealthModelSpecs(payload: unknown): Record<string, ModelCatalogSpecs> {
+  if (!isRecord(payload)) return {}
+  return Object.fromEntries(
+    // Later entries win, so the opencode listing takes precedence over opencode-go.
+    ["opencode-go", "opencode"]
+      .map((provider) => payload[provider])
+      .flatMap((provider) => (isRecord(provider) && isRecord(provider.models) ? Object.entries(provider.models) : []))
+      .flatMap(([id, value]) => {
+        const model = statModel(id, undefined)
+        if (!STEALTH_MODELS.has(model) || !isRecord(value)) return []
+        return [
+          [
+            model,
+            {
+              knowledge: stringValue(value.knowledge),
+              releaseDate: stringValue(value.release_date),
+              limit: readCatalogLimit(value.limit),
+              modalities: readCatalogModalities(value.modalities),
+            },
+          ] as const,
+        ]
+      }),
+  )
 }
 
 function readModelCatalogEntry(value: unknown): ModelCatalogEntry[] {
@@ -152,6 +284,7 @@ function readModelCatalogEntry(value: unknown): ModelCatalogEntry[] {
       lab: catalogSlug(lab),
       slug: catalogSlug(slug),
       name,
+      description: stringValue(value.description),
       family: stringValue(value.family),
       knowledge: stringValue(value.knowledge),
       releaseDate: stringValue(value.release_date),
@@ -159,8 +292,8 @@ function readModelCatalogEntry(value: unknown): ModelCatalogEntry[] {
       limit: readCatalogLimit(value.limit),
       modalities: readCatalogModalities(value.modalities),
       openWeights: booleanValue(value.open_weights),
-      reasoning: booleanValue(value.reasoning),
-      toolCall: booleanValue(value.tool_call),
+      reasoning: typeof value.reasoning === "boolean" ? value.reasoning : undefined,
+      toolCall: typeof value.tool_call === "boolean" ? value.tool_call : undefined,
       attachment: booleanValue(value.attachment),
       temperature: booleanValue(value.temperature),
       cost: readCatalogCost(value.cost),
@@ -170,10 +303,71 @@ function readModelCatalogEntry(value: unknown): ModelCatalogEntry[] {
   ]
 }
 
+function readCatalogModels(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) return payload
+  if (!isRecord(payload)) return []
+  if (Array.isArray(payload.models)) return payload.models
+  if (isRecord(payload.models)) return Object.values(payload.models)
+  return Object.values(payload)
+}
+
+function readCatalogLabDescriptions(...payloads: unknown[]) {
+  const descriptions = new Map<string, string>()
+  const add = (value: unknown, fallbackId?: string) => {
+    if (!isRecord(value)) return
+    const description = stringValue(value.description)
+    if (!description) return
+    const id = stringValue(value.id) ?? fallbackId
+    const name = stringValue(value.name)
+    const title = stringValue(value.title)
+    const keys = [id, name, title]
+    keys.forEach((key) => {
+      if (!key) return
+      descriptions.set(catalogLabSlug(key), description)
+    })
+  }
+  const addCollection = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach((item) => add(item))
+      return
+    }
+    if (!isRecord(value)) return
+    Object.entries(value).forEach(([key, item]) => add(item, key))
+  }
+
+  payloads.forEach((payload) => {
+    if (Array.isArray(payload)) {
+      payload.forEach((item) => add(item))
+      return
+    }
+    if (!isRecord(payload)) return
+    addCollection(payload.labs)
+    addCollection(payload.providers)
+    Object.entries(payload).forEach(([key, value]) => add(value, key))
+  })
+
+  return descriptions
+}
+
 async function fetchCatalogPayload(url: string) {
   return fetch(url)
     .then((response): Promise<unknown> => (response.ok ? (response.json() as Promise<unknown>) : Promise.resolve()))
     .catch(() => undefined)
+}
+
+async function fetchLabCatalogPayload(url: string) {
+  return fetch(url)
+    .then((response) => (response.ok ? response.text() : Promise.resolve("")))
+    .then(readLabSearchIndex)
+    .catch(() => undefined)
+}
+
+function readLabSearchIndex(html: string) {
+  const match = /<script[^>]*id=["']search-index["'][^>]*>([\s\S]*?)<\/script>/.exec(html)
+  if (!match) return undefined
+  const parsed = JSON.parse(match[1]) as unknown
+  if (!Array.isArray(parsed)) return undefined
+  return parsed.filter((item) => isRecord(item) && item.type === "lab")
 }
 
 function readCatalogCosts(payload: unknown) {

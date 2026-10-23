@@ -2,7 +2,7 @@
 
 AI coding agent for your terminal — powered by your awacxocode subscription.
 
-awacxocode gives you a fast, capable coding agent in the terminal with access to top open and frontier models (DeepSeek V4, GLM 5.2, Kimi 2.6, GPT, and more) through a single subscription. No juggling provider keys — sign in once and code.
+awacxocode gives you a fast, capable coding agent in the terminal with access to frontier and open models through a single subscription. No juggling provider keys — sign in once and code.
 
 ## Install
 
@@ -19,10 +19,17 @@ curl -fsSL https://code.awacxo.com/install | bash -s -- --version 1.0.0
 ## Getting started
 
 ```bash
-awacxocode        # start the agent in the current project
+awacxocode login   # sign in with your awacxocode account
+awacxocode         # start the agent in the current project
 ```
 
-Sign in with your awacxocode account when prompted. Your plan determines which models are available.
+Your plan determines which models are available.
+
+## Updating
+
+```bash
+awacxocode upgrade
+```
 
 ## Plans
 
