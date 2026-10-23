@@ -1,20 +1,26 @@
 #!/bin/sh
+# awacxocode pre-push (replaces upstream's, which lints/typechecks opencode's whole monorepo and
+# needs more RAM than a typical dev box). Typecheck + build + smoke tests run in fork/upgrade.sh
+# and fork/release.sh; this hook only does the cheap checks that matter on every push.
 set -e
-# Check if bun version matches package.json
-# keep in sync with packages/script/src/index.ts semver qualifier
+
+# The build needs the bun version pinned in package.json.
 bun -e '
 import { semver } from "bun";
 const pkg = await Bun.file("package.json").json();
-const expectedBunVersion = pkg.packageManager?.split("@")[1];
-if (!expectedBunVersion) {
-  throw new Error("packageManager field not found in root package.json");
-}
-const expectedBunVersionRange = `^${expectedBunVersion}`;
-if (!semver.satisfies(process.versions.bun, expectedBunVersionRange)) {
-  throw new Error(`This script requires bun@${expectedBunVersionRange}, but you are using bun@${process.versions.bun}`);
-}
-if (process.versions.bun !== expectedBunVersion) {
-  console.warn(`Warning: Bun version ${process.versions.bun} differs from expected ${expectedBunVersion}`);
-}
+const expected = pkg.packageManager?.split("@")[1];
+if (!expected) throw new Error("packageManager field not found in root package.json");
+if (!semver.satisfies(process.versions.bun, `^${expected}`))
+  throw new Error(`This repo requires bun@^${expected}, but you are using bun@${process.versions.bun}`);
 '
-bun run check
+
+# Files we own live in fork/overlay/ and are copied over upstream on every upgrade. An edit made
+# only to the tree copy would be silently lost at the next upgrade, so the two must match.
+drift=$(cd fork/overlay && find . -type f | while read -r file; do
+  cmp -s "$file" "../../$file" || echo "  ${file#./}"
+done)
+if [ -n "$drift" ]; then
+  echo "These files differ from their fork/overlay/ copies (copy your change into fork/overlay/):" >&2
+  echo "$drift" >&2
+  exit 1
+fi
